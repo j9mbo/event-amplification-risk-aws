@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Event amplification risk prediction lab (baseline vs ML-guarded)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        APP_NAME: event-amplification-risk
+        STATE_TABLE_NAME: !Ref EventStateTable
+        MAIN_QUEUE_URL: !Ref MainQueue
+        QUARANTINE_QUEUE_URL: !Ref QuarantineQueue
+        DLQ_URL: !Ref DeadLetterQueue
+        MODE: baseline  # baseline | guarded
+        RISK_THRESHOLD: "0.80"
+
+Resources:
+  # --- Queues ---
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  MainQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 4
+
+  QuarantineQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600
+
+  # --- DynamoDB ---
+  EventStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # --- Lambdas ---
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../src/lambdas/processor/
+      Handler: app.handler
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt MainQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EventStateTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:GetQueueAttributes
+              Resource:
+                - !GetAtt MainQueue.Arn
+                - !GetAtt QuarantineQueue.Arn
+                - !GetAtt DeadLetterQueue.Arn
+      Events:
+        FromMainQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt MainQueue.Arn
+            BatchSize: 1
+
+  RiskGateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../src/lambdas/risk_gate/
+      Handler: app.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EventStateTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:GetQueueAttributes
+              Resource:
+                - !GetAtt MainQueue.Arn
+                - !GetAtt QuarantineQueue.Arn
+      # Risk gate can be invoked two ways:
+      # 1) directly by Generator (sync invoke) OR
+      # 2) via a separate "ingest queue" (optional later)
+
+  GeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../src/lambdas/generator/
+      Handler: app.handler
+      Timeout: 30
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource:
+                - !GetAtt MainQueue.Arn
+                - !GetAtt QuarantineQueue.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt RiskGateFunction.Arn
+
+Outputs:
+  MainQueueUrl:
+    Value: !Ref MainQueue
+  QuarantineQueueUrl:
+    Value: !Ref QuarantineQueue
+  DLQUrl:
+    Value: !Ref DeadLetterQueue
+  ProcessorFunctionName:
+    Value: !Ref ProcessorFunction
+  RiskGateFunctionName:
+    Value: !Ref RiskGateFunction
+  GeneratorFunctionName:
+    Value: !Ref GeneratorFunction
