@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+
+# SAM build artifacts
+.aws-sam/
+samconfig.toml
+
+# model/data artifacts
+data/
+models/
+outputs/
