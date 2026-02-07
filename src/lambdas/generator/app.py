@@ -18,9 +18,10 @@ def handler(event, context):
     # Basic configurable batch
     count = int(event.get("count", 100))
     profile = event.get("profile", "mixed")  # normal|poison|fanout|loop|mixed
+    run_id = event.get("runId") or f"run-{int(time.time())}"
 
     for i in range(count):
-        ev = make_event(profile, i)
+        run_id = event.get("runId") or f"run-{int(time.time())}"
         if MODE == "guarded" and RISK_GATE_FN:
             lmb.invoke(
                 FunctionName=RISK_GATE_FN,
@@ -32,7 +33,7 @@ def handler(event, context):
 
     return {"sent": count, "mode": MODE, "profile": profile}
 
-def make_event(profile: str, idx: int):
+def make_event(profile: str, idx: int, run_id: str):
     event_type = choose_type(profile)
     fanout = 0
     if event_type == "FANOUT":
@@ -42,7 +43,7 @@ def make_event(profile: str, idx: int):
         "eventType": event_type,
         "producerId": "lab-generator",
         "schemaVersion": "1.0",
-        "correlationId": f"run-{int(time.time())}",
+        "correlationId": run_id,
         "payload": payload,
         "fanoutDegree": fanout,
         "hopCount": 0,
