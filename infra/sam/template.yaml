@@ -1,6 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Event amplification risk prediction lab (baseline vs ML-guarded)
+Parameters:
+  Mode:
+    Type: String
+    Default: baseline
+    AllowedValues:
+      - baseline
+      - guarded
+  RiskThreshold:
+    Type: String
+    Default: "0.80"
 
 Globals:
   Function:
@@ -15,8 +25,8 @@ Globals:
         MAIN_QUEUE_URL: !Ref MainQueue
         QUARANTINE_QUEUE_URL: !Ref QuarantineQueue
         DLQ_URL: !Ref DeadLetterQueue
-        MODE: baseline  # baseline | guarded
-        RISK_THRESHOLD: "0.80"
+        MODE: !Ref Mode
+        RISK_THRESHOLD: !Ref RiskThreshold
 
 Resources:
   # --- Queues ---
@@ -58,6 +68,10 @@ Resources:
   ProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Environment:
+        Variables:
+          MAX_FANOUT: "5"
+          MAX_HOPS: "4"
       CodeUri: ../../src/lambdas/processor/
       Handler: app.handler
       Policies:
@@ -107,6 +121,9 @@ Resources:
       CodeUri: ../../src/lambdas/generator/
       Handler: app.handler
       Timeout: 30
+      Environment:
+        Variables:
+          RISK_GATE_FN: !Ref RiskGateFunction
       Policies:
         - Statement:
             - Effect: Allow
@@ -135,3 +152,5 @@ Outputs:
     Value: !Ref RiskGateFunction
   GeneratorFunctionName:
     Value: !Ref GeneratorFunction
+  StateTableName:
+    Value: !Ref EventStateTable

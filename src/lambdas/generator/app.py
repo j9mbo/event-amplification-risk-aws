@@ -15,13 +15,14 @@ SEED = int(os.getenv("SEED", "42"))
 def handler(event, context):
     random.seed(SEED)
 
-    # Basic configurable batch
+    run_id = event.get("runId") or event.get("run_id") or f"run-{int(time.time())}"
+
     count = int(event.get("count", 100))
-    profile = event.get("profile", "mixed")  # normal|poison|fanout|loop|mixed
-    run_id = event.get("runId") or f"run-{int(time.time())}"
+    profile = event.get("profile", "mixed")
 
     for i in range(count):
-        run_id = event.get("runId") or f"run-{int(time.time())}"
+        ev = make_event(profile, i, run_id)
+
         if MODE == "guarded" and RISK_GATE_FN:
             lmb.invoke(
                 FunctionName=RISK_GATE_FN,
@@ -31,14 +32,16 @@ def handler(event, context):
         else:
             sqs.send_message(QueueUrl=MAIN_QUEUE_URL, MessageBody=json.dumps(ev))
 
-    return {"sent": count, "mode": MODE, "profile": profile}
+    return {"sent": count, "mode": MODE, "profile": profile, "runId": run_id}
 
 def make_event(profile: str, idx: int, run_id: str):
     event_type = choose_type(profile)
     fanout = 0
     if event_type == "FANOUT":
         fanout = random.choice([5, 10, 20, 30])
+
     payload = {"i": idx, "kind": event_type, "data": "x" * random.choice([50, 200, 1000])}
+
     return {
         "eventType": event_type,
         "producerId": "lab-generator",
@@ -49,6 +52,7 @@ def make_event(profile: str, idx: int, run_id: str):
         "hopCount": 0,
         "timestamp": int(time.time()),
     }
+
 
 def choose_type(profile: str) -> str:
     if profile == "normal":
