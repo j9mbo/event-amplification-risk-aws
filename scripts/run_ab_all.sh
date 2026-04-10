@@ -35,6 +35,12 @@ WAIT_FANOUT="${WAIT_FANOUT:-30}"
 WAIT_LOOP="${WAIT_LOOP:-30}"
 WAIT_POISON="${WAIT_POISON:-360}"
 
+# Optional strict gating for GUARDED runs (like sanity-check)
+GUARDED_STRICT_THR="${GUARDED_STRICT_THR:-}"   # e.g. 0.0 ; empty => don't change thresholds
+GUARDED_DEFAULT_THR="${GUARDED_DEFAULT_THR:-0.80}"
+
+# Optional extra purge (main is already supported)
+PURGE_QUARANTINE="${PURGE_QUARANTINE:-0}"      # 1=yes, 0=no
 # quiescence knobs forwarded to run_one.sh
 export REQUIRED_ZERO_STREAK="${REQUIRED_ZERO_STREAK:-3}"
 export OBS_WINDOW_SECONDS="${OBS_WINDOW_SECONDS:-120}"
@@ -47,10 +53,9 @@ use_env() {
     exit 2
   fi
   set -a
-  # shellcheck disable=SC1090
   source "$env_file"
   set +a
-
+  export ENV_FILE="$env_file"   
   export MODE="$mode"
   export AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 
@@ -69,6 +74,28 @@ purge_main_queue_once() {
   fi
   sleep "$PURGE_SLEEP_SECONDS"
 }
+jq_merge_thr() {
+  local fn="$1"
+  local thr="$2"
+
+  local vars env
+  vars="$(aws lambda get-function-configuration --function-name "$fn" \
+           --query 'Environment.Variables' --output json)"
+  env="$(jq -c --arg thr "$thr" '.RISK_THRESHOLD=$thr | {Variables: .}' <<<"$vars")"
+
+  aws lambda update-function-configuration \
+    --function-name "$fn" \
+    --environment "$env" >/dev/null
+}
+
+purge_quarantine_once() {
+  [[ "$PURGE_QUARANTINE" -eq 1 ]] || return 0
+  echo "==> Purging QUARANTINE queue + cooldown ${PURGE_SLEEP_SECONDS}s"
+  if ! aws sqs purge-queue --queue-url "$QUARANTINE_QUEUE_URL" >/dev/null 2>&1; then
+    echo "    PurgeQueueInProgress -> cooldown ${PURGE_SLEEP_SECONDS}s (no retry)"
+  fi
+  sleep "$PURGE_SLEEP_SECONDS"
+}
 
 run_case_repeated() {
   local prefix="$1" profile="$2" count="$3" wait="$4" reps="$5"
@@ -77,10 +104,18 @@ run_case_repeated() {
     run_id="${prefix}_${ts}_r${r}"
 
     purge_main_queue_once
+    purge_quarantine_once
 
     echo "==> RUN: $run_id profile=$profile count=$count wait=$wait MODE=$MODE"
+    if [[ "$MODE" == "guarded" && "$profile" == "fanout" && -n "$GUARDED_STRICT_THR" ]]; then
+      echo "==> Applying GUARDED_STRICT_THR=$GUARDED_STRICT_THR"
+      jq_merge_thr "$RISK_GATE_FN" "$GUARDED_STRICT_THR"
+    fi
     ./scripts/run_one.sh "$run_id" "$profile" "$count" "$wait"
-
+    if [[ "$MODE" == "guarded" && "$profile" == "fanout" && -n "$GUARDED_STRICT_THR" ]]; then
+      echo "==> Restoring GUARDED_DEFAULT_THR=$GUARDED_DEFAULT_THR"
+      jq_merge_thr "$RISK_GATE_FN" "$GUARDED_DEFAULT_THR"
+    fi
     sleep "$BETWEEN_RUN_SLEEP_SECONDS"
   done
 }

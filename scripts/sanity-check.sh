@@ -110,8 +110,9 @@ main() {
   if [[ -n "${PROCESSOR_FN:-}" ]]; then jq_merge_thr "$PROCESSOR_FN" "$STRICT_THR"; fi
 
   echo "==> Run guarded sanity (no CloudWatch needed)"
-  MODE="guarded" "$RUN_ONE" "sanity_gate_strict" "$PROFILE" "$COUNT" 25
-
+  RUN_ID="sanity_gate_strict_$(date -u +%Y%m%dT%H%M%SZ)"
+  MODE="guarded" "$RUN_ONE" "$RUN_ID" "$PROFILE" "$COUNT" 25
+  echo "==> RunId used: $RUN_ID"
   echo "==> Sleep ${OBS_SLEEP}s to let gate enqueue"
   sleep "$OBS_SLEEP"
 

@@ -7,11 +7,20 @@ set -euo pipefail
 #       Do purge in a higher-level orchestrator (e.g., run_ab_all.sh).
 
 # load .env (if exists)
-if [[ -f ".env" ]]; then
+maybe_source_env() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
   set -a
-  # shellcheck disable=SC1091
-  source .env
+  source "$f"
   set +a
+}
+
+if [[ -n "$ENV_FILE" ]]; then
+  maybe_source_env "$ENV_FILE"
+elif [[ -f ".env" ]]; then
+  if [[ -z "${GENERATOR_FN:-}" || -z "${PROCESSOR_FN:-}" || -z "${MAIN_QUEUE_URL:-}" || -z "${DLQ_URL:-}" || -z "${QUARANTINE_QUEUE_URL:-}" || -z "${STATE_TABLE_NAME:-}" ]]; then
+    maybe_source_env ".env"
+  fi
 fi
 
 : "${GENERATOR_FN:?GENERATOR_FN is required}"
