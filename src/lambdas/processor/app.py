@@ -32,6 +32,7 @@ def handler(event, context):
         approx_receive = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
 
         et = ev.get("eventType", "NORMAL")
+        emitted = 0  # actual number of children emitted (behavioural signal)
 
         # --- POISON: execution-failure path (leave to SQS redrive / DLQ)
         if et == "POISON":
@@ -41,8 +42,23 @@ def handler(event, context):
         if et == "SLOW":
             time.sleep(0.2)
 
-        # --- FANOUT: bounded emission in guarded mode
-        if et == "FANOUT":
+        # --- MASKING: real fan-out hidden from the gate. Declared fields are benign (the gate
+        # admitted the event), but it really emits realFanout children. The processor realizes
+        # the physical consequence the gate never saw, because the gate scored declared metadata.
+        if "realFanout" in ev:
+            requested = max(0, min(int(ev.get("realFanout", 0) or 0), 50))
+            n = requested
+            if MODE == "guarded":
+                n = min(requested, MAX_FANOUT)  # processor cap: the weaker, second line
+                if requested > MAX_FANOUT:
+                    _write_state(pk, ttl, ev, approx_receive, outcome=f"bounded_mask_truncated:{requested}->{n}")
+            for i in range(n):
+                child = _child_event(ev, suffix=f"mask{i}", hop_inc=1, event_type="NORMAL")
+                sqs.send_message(QueueUrl=MAIN_QUEUE_URL, MessageBody=json.dumps(child))
+            emitted = n
+
+        # --- FANOUT: bounded emission in guarded mode (honest profile, no masking)
+        if et == "FANOUT" and "realFanout" not in ev:
             requested = max(0, min(int(ev.get("fanoutDegree", 10) or 10), 50))
             n = requested
 
@@ -55,6 +71,7 @@ def handler(event, context):
             for i in range(n):
                 child = _child_event(ev, suffix=f"fanout{i}", hop_inc=1, event_type="NORMAL")
                 sqs.send_message(QueueUrl=MAIN_QUEUE_URL, MessageBody=json.dumps(child))
+            emitted = n
 
         # --- LOOP: bounded depth in guarded mode
         if et == "LOOP":
@@ -62,6 +79,7 @@ def handler(event, context):
             if hop < MAX_HOPS:
                 child = _child_event(ev, suffix="loop", hop_inc=1, event_type="LOOP")
                 sqs.send_message(QueueUrl=MAIN_QUEUE_URL, MessageBody=json.dumps(child))
+                emitted = 1
             else:
                 if MODE == "guarded" and QUARANTINE_QUEUE_URL:
                     # optional: quarantine terminal loop events
@@ -73,7 +91,7 @@ def handler(event, context):
                     continue
 
         # Default success for non-bounded cases
-        _write_state(pk, ttl, ev, approx_receive, outcome="success")
+        _write_state(pk, ttl, ev, approx_receive, outcome="success", emitted=emitted)
 
     return {"ok": True}
 
@@ -113,19 +131,30 @@ def _child_event(parent: dict, suffix: str, hop_inc: int, event_type: str) -> di
     }
 
 
-def _write_state(pk: str, ttl: int, ev: dict, approx_receive: int, outcome: str):
-    table.put_item(
-        Item={
-            "pk": pk,
-            "ttl": ttl,
-            "eventType": ev.get("eventType", "na"),
-            "correlationId": ev.get("correlationId", "na"),
-            "eventId": ev.get("eventId", "na"),
-            "payloadSizeBytes": int(ev.get("payloadSizeBytes", 0)),
-            "fanoutDegree": int(ev.get("fanoutDegree", 0)),
-            "hopCount": int(ev.get("hopCount", 0)),
-            "approxReceiveCount": approx_receive,
-            "outcome": outcome,
-            "ts": int(time.time()),
-        }
-    )
+def _write_state(pk: str, ttl: int, ev: dict, approx_receive: int, outcome: str, emitted: int = 0):
+    item = {
+        "pk": pk,
+        "ttl": ttl,
+        "eventType": ev.get("eventType", "na"),
+        "correlationId": ev.get("correlationId", "na"),
+        "eventId": ev.get("eventId", "na"),
+        "producerId": ev.get("producerId", "unknown"),
+        "payloadSizeBytes": int(ev.get("payloadSizeBytes", 0)),
+        # declared (gate sees this) -- the model must learn NOT to trust it
+        "fanoutDegree": int(ev.get("fanoutDegree", 0)),
+        "hopCount": int(ev.get("hopCount", 0)),
+        # actual behavioural signal -- real number of children emitted
+        "emittedChildren": int(emitted),
+        "approxReceiveCount": approx_receive,
+        "outcome": outcome,
+        "ts": int(time.time()),
+    }
+    # stream creation order (for rolling per-source reputation)
+    if "genSeq" in ev:
+        item["genSeq"] = int(ev.get("genSeq", 0))
+    # ground-truth masking labels (analysis only, NOT model features)
+    if "realFanout" in ev:
+        item["realFanout"] = int(ev.get("realFanout", 0))
+    if "maskStrategy" in ev:
+        item["maskStrategy"] = ev.get("maskStrategy")
+    table.put_item(Item=item)

@@ -13,3 +13,9 @@ samconfig.toml
 data/
 models/
 outputs/
+
+# manuscripts and local notes (keep repo code-only)
+*.docx
+*.md
+!README.md
+!docs/*.md

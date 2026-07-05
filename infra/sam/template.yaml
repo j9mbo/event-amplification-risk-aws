@@ -120,7 +120,7 @@ Resources:
     Properties:
       CodeUri: ../../src/lambdas/generator/
       Handler: app.handler
-      Timeout: 30
+      Timeout: 300  # population mode makes many sequential synchronous gate invocations
       Environment:
         Variables:
           RISK_GATE_FN: !Ref RiskGateFunction

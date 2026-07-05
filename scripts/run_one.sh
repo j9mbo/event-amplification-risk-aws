@@ -111,10 +111,14 @@ TMP_PAYLOAD_FILE="$(mktemp)"
 cleanup() { rm -f "$TMP_PAYLOAD_FILE"; }
 trap cleanup EXIT
 
+# Optional per-run seed: if RUN_SEED is set, add it to the generator payload.
+SEED_JSON=""
+if [[ -n "${RUN_SEED:-}" ]]; then SEED_JSON=", \"seed\": $RUN_SEED"; fi
+
 INVOKE_META="$(aws lambda invoke \
   --function-name "$GENERATOR_FN" \
   --cli-binary-format raw-in-base64-out \
-  --payload "{\"count\": $COUNT, \"profile\": \"$PROFILE\", \"runId\": \"$RUN_ID\"}" \
+  --payload "{\"count\": $COUNT, \"profile\": \"$PROFILE\", \"runId\": \"$RUN_ID\"$SEED_JSON}" \
   "$TMP_PAYLOAD_FILE"
 )"
 
